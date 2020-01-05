@@ -1,0 +1,26 @@
+{
+  "name": "electron-building-problem",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+  },
+  "build": {
+    "appId": "com.example.app",
+    "extraResources": ["some.txt"],
+    "mac": { "category": "your.app.category.type"},
+    "win": { "target": ["portable", "NSIS"]},
+    "directories": {"output": "release"}
+  },
+  "devDependencies": {
+    "electron-builder": "^21.2.0"
+  }
+}
