@@ -1,0 +1,16 @@
+flavors:
+  python_function:
+    artifacts:
+      artifact_file:
+        path: artifacts/model_arguments.txt
+        uri: model_arguments.txt
+      meta:
+        path: artifacts/meta.pkl
+        uri: /var/folders/wp/lqt8zzzj1pn72wxvxq3hxcp80000gn/T/tmpcc72ai1d/meta.pkl
+    cloudpickle_version: 1.4.1
+    code: code
+    env: conda.yaml
+    loader_module: mlflow.pyfunc.model
+    python_model: python_model.pkl
+    python_version: 3.7.6
+utc_time_created: '2020-07-01 11:12:07.005556'
