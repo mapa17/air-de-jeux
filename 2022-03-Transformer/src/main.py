@@ -75,7 +75,7 @@ def evaluate(model: nn.Module, loss_fun : _Loss, eval_data: Names) -> float:
                 src_mask = src_mask[:this_batch_size, :this_batch_size]
             output = model(data, src_mask)
             output_flat = output.view(-1, ntokens)
-            total_loss += batch_size * loss_fun(output_flat, targets.reshape(-1)).item()
+            total_loss += loss_fun(output_flat, targets.reshape(-1)).item()
     return total_loss / num_batches 
 
 
@@ -87,10 +87,10 @@ if __name__ == "__main__":
 
     # Transformer configuration
     ntokens = len(trn_data.names_dataset.vocab)  # size of vocabulary
-    emsize = 20  # embedding dimension
-    d_hid = 20  # dimension of the feedforward network model in nn.TransformerEncoder
+    emsize = 80  # embedding dimension
+    d_hid = 80  # dimension of the feedforward network model in nn.TransformerEncoder
     nlayers = 2  # number of nn.TransformerEncoderLayer in nn.TransformerEncoder
-    nhead = 2  # number of heads in nn.MultiheadAttention
+    nhead = 4  # number of heads in nn.MultiheadAttention
     dropout = 0.2  # dropout probability
     model = TransformerModel(ntokens, emsize, nhead, d_hid, nlayers, dropout).to(device)
 
@@ -102,16 +102,15 @@ if __name__ == "__main__":
     epochs = 50 
     best_model = None
 
+    print('-' * 89)
     for epoch in range(1, epochs + 1):
         epoch_start_time = time.time()
-        train(model, loss_fun, optimizer, trn_data)
+        trn_loss = train(model, loss_fun, optimizer, trn_data)
         val_loss = evaluate(model, loss_fun, val_data)
         val_ppl = math.exp(val_loss)
         elapsed = time.time() - epoch_start_time
-        print('-' * 89)
         print(f'| end of epoch {epoch:3d} | time: {elapsed:5.2f}s | '
-            f'valid loss {val_loss:5.2f} | valid ppl {val_ppl:8.2f}')
-        print('-' * 89)
+            f'training loss {trn_loss:5.2f} | valid loss {val_loss:5.2f}')
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
