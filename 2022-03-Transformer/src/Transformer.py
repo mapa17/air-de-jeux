@@ -1,3 +1,6 @@
+import inspect
+from typing import Dict
+
 import torch
 from torch import nn, Tensor
 import math
@@ -39,10 +42,16 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 class TransformerModel(nn.Module):
+    kwargs : Dict[str, None]
 
     def __init__(self, ntoken: int, d_model: int, nhead: int, d_hid: int,
                  nlayers: int, dropout: float = 0.5):
         super().__init__()
+
+        s = inspect.signature(self.__init__)
+        l = locals()
+        self.kwargs = {k: l[k] for k in s.parameters.keys()}
+
         self.model_type = 'Transformer'
         self.pos_encoder = PositionalEncoding(d_model, dropout)
         encoder_layers = TransformerEncoderLayer(d_model, nhead, d_hid, dropout)

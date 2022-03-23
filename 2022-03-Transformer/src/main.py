@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Dict, Callable
 import copy
 import time
 import math
@@ -7,8 +7,10 @@ import math
 from numpy import ndarray
 import pandas as pd
 from pandas import DataFrame
-from tqdm import tqdm
+#from tqdm import tqdm
 
+
+import typer
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -22,7 +24,9 @@ from Transformer import TransformerModel, generate_square_subsequent_mask
 from Names import Names
 
 
-def train(model: nn.Module, loss_fun : _Loss, optimizer : Optimizer, train_data : Names) -> float:
+app = typer.Typer()
+
+def train(model: nn.Module, loss_fun : _Loss, optimizer : Optimizer, train_data : Names, device : torch.device) -> float:
     """Train given Transformer model applying causality masking.
 
     Args:
@@ -60,7 +64,7 @@ def train(model: nn.Module, loss_fun : _Loss, optimizer : Optimizer, train_data 
     return total_loss / num_batches
 
 
-def evaluate(model: nn.Module, loss_fun : _Loss, eval_data: Names) -> float:
+def evaluate(model: nn.Module, loss_fun : _Loss, eval_data: Names, device : torch.device) -> float:
     model.eval()  # turn on evaluation mode
     total_loss = 0.
     batch_size = eval_data.batch_size 
@@ -78,12 +82,77 @@ def evaluate(model: nn.Module, loss_fun : _Loss, eval_data: Names) -> float:
             total_loss += loss_fun(output_flat, targets.reshape(-1)).item()
     return total_loss / num_batches 
 
+def save_model(path : Path, model: nn.Module, optimizer: torch.optim.Optimizer, epoch: int, loss: float, device : str) :
+    torch.save({
+            'model_state_dict': model.state_dict(),
+            'model_kwargs' : model.kwargs,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'epoch': epoch,
+            'loss': loss,
+            'device': device,
+            }, path)
 
-if __name__ == "__main__":
+
+def load_model(path : Path, model_cls : Callable, optimizer_cls : Callable, device : str) -> Dict[str, None] :
+    """Load a stored model checkpoint including the optimizer. Makes sure to load
+    the model onto the given device correctly.
+
+    Args:
+        path (str): _description_
+        model (nn.Module): _description_
+        optimizer (torch.optim.Optimizer): _description_
+        state_dict (Dict[str, None]): _description_
+        device (str): _description_
+
+    Raises:
+        ValueError: _description_
+
+    Returns:
+        Dict[str, None]: _description_
+    """
+
+    checkpoint = torch.load(path)
+    src_dev = checkpoint['device']
+    dest_dev = device
+
+    model_kwargs = checkpoint['model_kwargs']
+    model = model_cls(**model_kwargs)
+
+    if src_dev == 'cuda' and dest_dev == 'cpu':
+        model.load_state_dict(checkpoint['model_state_dict'], map_location = torch.device('cpu'))
+    elif src_dev == 'cuda' and dest_dev == 'cuda':
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.to(torch.device('cuda'))
+    elif src_dev == 'cpu' and dest_dev == 'cuda':
+        model.load_state_dict(checkpoint['model_state_dict'], map_location = torch.device('cuda:0'))
+    elif src_dev == 'cpu' and dest_dev == 'cpu':
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        raise ValueError(f"Can not load model from {src_dev} to {dest_dev} ...")
+
+    optimizer = optimizer_cls(model.parameters(), lr=0.0)
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    epoch = checkpoint['epoch']
+    loss = checkpoint['loss']
+
+
+    loaded_model = {
+        'model': model,
+        'optimizer': optimizer,
+        'epoch': epoch,
+        'loss': loss
+    }
+
+    return loaded_model
+
+@app.command()
+def train_model(data : Path, epochs : int, storage : Path) :
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    trn_data = Names("2022-03-Transformer/data/training.csv", 8, device)
+    trn_data = Names(data / "training.csv", 8, device)
     # Make sure to use the same vocab for validation as for training
-    val_data = Names('2022-03-Transformer/data/validation.csv', 8, device, vocab=trn_data.names_dataset.vocab)
+    val_data = Names(data / "validation.csv", 8, device, vocab=trn_data.names_dataset.vocab)
 
     # Transformer configuration
     ntokens = len(trn_data.names_dataset.vocab)  # size of vocabulary
@@ -99,14 +168,15 @@ if __name__ == "__main__":
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
     best_val_loss = float('inf')
-    epochs = 50 
+    best_epoch = 0
+    best_optimizer = None
     best_model = None
 
     print('-' * 89)
     for epoch in range(1, epochs + 1):
         epoch_start_time = time.time()
-        trn_loss = train(model, loss_fun, optimizer, trn_data)
-        val_loss = evaluate(model, loss_fun, val_data)
+        trn_loss = train(model, loss_fun, optimizer, trn_data, device)
+        val_loss = evaluate(model, loss_fun, val_data, device)
         val_ppl = math.exp(val_loss)
         elapsed = time.time() - epoch_start_time
         print(f'| end of epoch {epoch:3d} | time: {elapsed:5.2f}s | '
@@ -115,3 +185,19 @@ if __name__ == "__main__":
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model = copy.deepcopy(model)
+            best_optimizer = copy.deepcopy(optimizer)
+            best_epoch = epoch
+
+    storage = storage / "latest.pt"
+    print(f"Storing model to {storage} ...")
+    save_model(storage, best_model, best_optimizer, best_epoch, best_val_loss, str(device))
+
+
+@app.command()
+def predict(storage : Path) :
+    lm = load_model(storage, TransformerModel, torch.optim.SGD, 'cpu')
+    model = lm['model'].eval()
+
+ 
+if __name__ == "__main__":
+    app()
