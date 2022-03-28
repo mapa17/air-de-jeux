@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from torchtext.vocab import vocab, build_vocab_from_iterator
 
 from Transformer import TransformerModel, generate_square_subsequent_mask
-from Names import Names
+from Names import Names, NamesDataset
 
 
 app = typer.Typer()
@@ -39,6 +39,8 @@ def train(model: nn.Module, loss_fun : _Loss, optimizer : Optimizer, train_data 
 
     batch_size = train_data.batch_size
     ntokens = len(train_data.names_dataset.vocab)
+    # Create a additive mask that is used to exclude future sequence elements from
+    # the self attention mechanism
     src_mask = generate_square_subsequent_mask(batch_size).to(device)
     num_batches = len(train_data)
 
@@ -150,7 +152,7 @@ def load_model(path : Path, model_cls : Callable, optimizer_cls : Callable, devi
 def train_model(data : Path, epochs : int, storage : Path) :
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    trn_data = Names(data / "training.csv", 8, device)
+    trn_data = Names(data / "training.csv", 4, device)
     # Make sure to use the same vocab for validation as for training
     val_data = Names(data / "validation.csv", 8, device, vocab=trn_data.names_dataset.vocab)
 
@@ -177,7 +179,7 @@ def train_model(data : Path, epochs : int, storage : Path) :
         epoch_start_time = time.time()
         trn_loss = train(model, loss_fun, optimizer, trn_data, device)
         val_loss = evaluate(model, loss_fun, val_data, device)
-        val_ppl = math.exp(val_loss)
+        #val_ppl = math.exp(val_loss) # Validation perplexity
         elapsed = time.time() - epoch_start_time
         print(f'| end of epoch {epoch:3d} | time: {elapsed:5.2f}s | '
             f'training loss {trn_loss:5.2f} | valid loss {val_loss:5.2f}')
@@ -197,6 +199,9 @@ def train_model(data : Path, epochs : int, storage : Path) :
 def predict(storage : Path) :
     lm = load_model(storage, TransformerModel, torch.optim.SGD, 'cpu')
     model = lm['model'].eval()
+
+    start_sequence = NamesDataset.start_token
+    
 
  
 if __name__ == "__main__":

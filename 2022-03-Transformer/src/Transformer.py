@@ -48,6 +48,8 @@ class TransformerModel(nn.Module):
                  nlayers: int, dropout: float = 0.5):
         super().__init__()
 
+        # Store the kwargs as a dict, so they can be saved with the model
+        # and reused when loading the model.
         s = inspect.signature(self.__init__)
         l = locals()
         self.kwargs = {k: l[k] for k in s.parameters.keys()}
