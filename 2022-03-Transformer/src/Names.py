@@ -14,6 +14,7 @@ class NamesDataset(Dataset):
     stop_token = ">"
     padding_token = "!"
     names : ndarray
+    padded_sequence_length : int
     """Load names dataset and provide them as bached tensor of specific size"""
 
     def __init__(self, csv_file : Path, name_column : str = "name", vocab : Optional[vocab] = None):
@@ -27,6 +28,7 @@ class NamesDataset(Dataset):
         data = pd.read_csv(csv_file)
         self.names = data[name_column].values
         self.max_sequence_length = data[name_column].str.len().max()
+        self.padded_sequence_length = self.max_sequence_length+2
         self.__create_tokens(vocab)
 
     def __create_tokens(self, vocab : Optional[vocab] = None):
@@ -42,7 +44,7 @@ class NamesDataset(Dataset):
         #self.names_tks = [torch.tensor(self.vocab(chr), dtype=torch.long) for chr in name for name in self.names]
         self.names_tks = []
         for name in self.names:
-            n = list(f"{NamesDataset.start_token}{name}{NamesDataset.stop_token}".ljust(self.max_sequence_length+2, NamesDataset.padding_token))
+            n = list(f"{NamesDataset.start_token}{name}{NamesDataset.stop_token}".ljust(self.padded_sequence_length, NamesDataset.padding_token))
             self.names_tks.append(torch.tensor(self.vocab(n), dtype=torch.long))
 
     def __len__(self) -> int:
@@ -64,6 +66,9 @@ class Names(Iterator):
         self.names_dl = DataLoader(self.names_dataset, batch_size=batch_size, shuffle=True)
         self.names_iter = iter(self.names_dl)
         self.batch_size = batch_size
+
+    def get_padded_sequence_length(self) -> int:
+        return self.names_dataset.padded_sequence_length
  
     def get_batch(self) -> Tuple[torch.tensor, torch.tensor]:
         batch = next(self.names_iter)

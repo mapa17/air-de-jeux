@@ -1,4 +1,6 @@
+from locale import T_FMT_AMPM
 from pathlib import Path
+from re import S
 from typing import Tuple, Dict, Callable
 import copy
 import time
@@ -6,7 +8,7 @@ import math
 
 from numpy import ndarray
 import pandas as pd
-from pandas import DataFrame
+from pandas import DataFrame, Series
 #from tqdm import tqdm
 
 
@@ -37,17 +39,22 @@ def train(model: nn.Module, loss_fun : _Loss, optimizer : Optimizer, train_data 
     model.train()  # turn on train mode
     total_loss = 0.
 
-    batch_size = train_data.batch_size
     ntokens = len(train_data.names_dataset.vocab)
+    
+    # Remove one from the padded sequence length because we have the shift in the training/target data. We want to predict the next character.
+    sequence_length = train_data.get_padded_sequence_length()-1  
+
     # Create a additive mask that is used to exclude future sequence elements from
     # the self attention mechanism
-    src_mask = generate_square_subsequent_mask(batch_size).to(device)
+    src_mask = generate_square_subsequent_mask(sequence_length).to(device)
     num_batches = len(train_data)
 
     for i, (data, targets) in enumerate(train_data):
-        this_batch_size = data.size(0)
-        if this_batch_size != batch_size:  # only on last batch
-            src_mask = src_mask[:this_batch_size, :this_batch_size]
+
+        # Transpose the data in order to get it into the shape [sequence_length, batch_size]
+        data = data.T
+        targets = targets.T
+
         output = model(data, src_mask)
         # Transform the output and targets, show they work with the normal CrossEntropyLoss
         # function that expects an input [BS, output] and targets in shaped [BS]
@@ -69,16 +76,21 @@ def train(model: nn.Module, loss_fun : _Loss, optimizer : Optimizer, train_data 
 def evaluate(model: nn.Module, loss_fun : _Loss, eval_data: Names, device : torch.device) -> float:
     model.eval()  # turn on evaluation mode
     total_loss = 0.
-    batch_size = eval_data.batch_size 
+
+    # Remove one from the padded sequence length because we have the shift in the training/target data. We want to predict the next character.
+    sequence_length = eval_data.get_padded_sequence_length()-1  
+
     ntokens = len(eval_data.names_dataset.vocab)
     num_batches = len(eval_data)
-    src_mask = generate_square_subsequent_mask(batch_size).to(device)
+    src_mask = generate_square_subsequent_mask(sequence_length).to(device)
 
     with torch.no_grad():
         for (data, targets) in eval_data:
-            this_batch_size = data.size(0)
-            if batch_size != this_batch_size:
-                src_mask = src_mask[:this_batch_size, :this_batch_size]
+
+            # Transpose the data in order to get it into the shape [sequence_length, batch_size]
+            data = data.T
+            targets = targets.T
+
             output = model(data, src_mask)
             output_flat = output.view(-1, ntokens)
             total_loss += loss_fun(output_flat, targets.reshape(-1)).item()
@@ -148,25 +160,35 @@ def load_model(path : Path, model_cls : Callable, optimizer_cls : Callable, devi
 
     return loaded_model
 
+
 @app.command()
-def train_model(data : Path, epochs : int, storage : Path) :
+def create_vocab(data : Path, storage : Path):
+    data_loader = Names(data, 8, torch.device('cpu'))
+    vocab = data_loader.names_dataset.vocab
+
+    print(f"Storing vocab in {storage}")
+    torch.save(vocab, storage)
+
+@app.command()
+def train_model(data : Path, vocab_storage : Path, epochs : int, model_storage : Path) :
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    trn_data = Names(data / "training.csv", 4, device)
+    vocab = torch.load(vocab_storage)
+    trn_data = Names(data / "training.csv", 8, device, vocab=vocab)
     # Make sure to use the same vocab for validation as for training
-    val_data = Names(data / "validation.csv", 8, device, vocab=trn_data.names_dataset.vocab)
+    val_data = Names(data / "validation.csv", 8, device, vocab=vocab)
 
     # Transformer configuration
-    ntokens = len(trn_data.names_dataset.vocab)  # size of vocabulary
-    emsize = 80  # embedding dimension
-    d_hid = 80  # dimension of the feedforward network model in nn.TransformerEncoder
+    ntokens = len(vocab)  # size of vocabulary
+    emsize = 20  # embedding dimension (output of the encoder)
+    d_hid = 40  # dimension of the feedforward network model in nn.TransformerEncoder
     nlayers = 2  # number of nn.TransformerEncoderLayer in nn.TransformerEncoder
     nhead = 4  # number of heads in nn.MultiheadAttention
     dropout = 0.2  # dropout probability
     model = TransformerModel(ntokens, emsize, nhead, d_hid, nlayers, dropout).to(device)
 
     loss_fun = nn.CrossEntropyLoss()
-    lr = 1.0  # learning rate
+    lr = 0.5  # learning rate
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
 
     best_val_loss = float('inf')
@@ -190,19 +212,117 @@ def train_model(data : Path, epochs : int, storage : Path) :
             best_optimizer = copy.deepcopy(optimizer)
             best_epoch = epoch
 
-    storage = storage / "latest.pt"
-    print(f"Storing model to {storage} ...")
-    save_model(storage, best_model, best_optimizer, best_epoch, best_val_loss, str(device))
+    print(f"Storing model to {model_storage} ...")
+    save_model(model_storage, best_model, best_optimizer, best_epoch, best_val_loss, str(device))
 
 
 @app.command()
-def predict(storage : Path) :
-    lm = load_model(storage, TransformerModel, torch.optim.SGD, 'cpu')
+def predict(
+    model_storage : Path = typer.Argument(..., exists=True, readable=True),
+    vocab_storage : Path = typer.Argument(..., exists=True, readable=True),
+    num_names : int = typer.Argument(..., min=1),
+    names_storage : Path = typer.Argument(..., writable=True),
+    max_iterations : int = 100) :
+    """Predict names using a previously trained model and vocab.
+
+    Args:
+        model_storage (Path, optional): _description_. Defaults to typer.Argument(..., exists=True, readable=True).
+        vocab_storage (Path, optional): _description_. Defaults to typer.Argument(..., readable=True).
+        num_names (int, optional): _description_. Defaults to typer.Argument(..., min=1).
+        names_storage (Path, optional): _description_. Defaults to typer.Argument(..., writable=True).
+        max_iterations (int, optional): _description_. Defaults to 100.
+    """
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    lm = load_model(model_storage, TransformerModel, torch.optim.SGD, str(device))
+    vocab = torch.load(vocab_storage)
     model = lm['model'].eval()
 
-    start_sequence = NamesDataset.start_token
-    
+    batch_size=32
+    start_tk = vocab[NamesDataset.start_token]
+    stop_tk = vocab[NamesDataset.stop_token]
 
+    src_mask = generate_square_subsequent_mask(max_iterations).to(device)
+    names = []
+    num_batches = num_names // batch_size
+    last_batch_num_names = num_names - (num_batches*batch_size)
+    batch_names =[]
+    for batch_idx in range(num_batches+1):
+        names.extend(batch_names)
+        print(f"{batch_idx+1} Generating batch of names ...")
+        seqs = torch.tensor([start_tk, ], dtype=torch.long).repeat(1, batch_size)
+        for input_seq_length in range(1, max_iterations+1):
+            mask = src_mask[:input_seq_length, :input_seq_length]
+            logits = model(seqs, mask)
+
+            # Use the model output (token probability) to sample concrete tokens.
+            token_dist = torch.nn.functional.softmax(logits[-1, :])
+            next_token = torch.multinomial(token_dist, 1).T
+
+            # Accumulate tokens
+            seqs = torch.cat([seqs, next_token], dim=0)
+            
+            # Test if there is a stop token in each batch element
+            if min((seqs == stop_tk).sum(dim=0)) == 1:
+                break
+
+        # Position of the first stop token for each name
+        seq_length = torch.argmax((seqs == stop_tk).int(), dim=0)
+        token_idx = seqs.T.tolist()
+        batch_names = [''.join(vocab.lookup_tokens(tokens[1:sl])) for tokens, sl in zip(token_idx, seq_length)]
+
+    names.extend(batch_names[:last_batch_num_names])
+    names.insert(0, 'name') # Add column name to have identical structure as the training data
+
+    print(f"Writing names to {names_storage} ...")
+    with open(names_storage, 'w') as f:
+        f.writelines('\n'.join(names))
+
+
+def name_comparison(tgt_names : Series, syn_names : Series) -> Dict[str, float] :
+    unique_names = syn_names.nunique() / syn_names.shape[0]
+    
+    # Name overlap
+    identical_names = sum([1 if n in list(syn_names) else 0 for n in list(tgt_names)]) / syn_names.shape[0]
+
+    #
+    split_syn_names = syn_names.str.split(' ', n=1, expand=True)
+    split_tgt_names = tgt_names.str.split(' ', n=1, expand=True)
+    
+    sf = split_syn_names[0]
+    sl = split_syn_names[1]
+    tf = split_tgt_names[0]
+    tl = split_tgt_names[1]
+
+    identical_first_names = sum([1 if n in list(sf) else 0 for n in list(tf)]) / sf.shape[0]
+    identical_last_names = sum([1 if n in list(sl) else 0 for n in list(tl)]) / sl.shape[0]
+
+    avg_sf = sf.str.len().mean()
+    avg_tf = tf.str.len().mean()
+    avg_sl = sl.str.len().mean()
+    avg_tl = tl.str.len().mean()
+
+    metrics = {
+        'unique_names': unique_names,
+        'identical_names': identical_names,
+        'identical_f': identical_first_names,
+        'identical_l': identical_last_names,
+        'avg_f_diff': avg_sf-avg_tf,
+        'avg_l_diff': avg_sl-avg_tl,
+    }
+    return metrics
+
+@app.command()
+def compare(
+    tgt_names_storage : Path = typer.Argument(..., exists=True, readable=True),
+    syn_names_storage : Path = typer.Argument(..., exists=True, readable=True)
+    ) :
+    tgt_names = pd.read_csv(tgt_names_storage)
+    syn_names = pd.read_csv(syn_names_storage)
+
+    # Calculate metrics
+    metrics = name_comparison(tgt_names['name'], syn_names['name'])
+    print(metrics)
  
 if __name__ == "__main__":
     app()
